@@ -17,7 +17,7 @@ BORDER_COLOR = np.array([30, 30, 30])
 BORDER_TOLERANCE = 10
 
 X1, Y1, X2, Y2 = 716, 317, 1203, 804
-CHECK_DELAY = 0.01  # for near realtime update
+CHECK_DELAY = 0.01  # near realtime update
 DETECTION_ENABLED = True
 RUNNING = True
 
@@ -26,7 +26,7 @@ TILE_MATCH_THRESHOLD = 0.75
 BASE_TEMPLATE_SIZE = 18
 
 last_click_pos = None
-remaining_mines = None  # will be set by user input on demand
+remaining_mines = None  # set by user input on demand
 
 TARGET_RGB = (163, 163, 163)  # "?" pixel color
 
@@ -35,8 +35,8 @@ TEMPLATES = defaultdict(list)
 for fname in os.listdir(TEMPLATE_DIR):
     name, ext = os.path.splitext(fname)
     if ext.lower() in ['.png', '.jpg']:
-        match = re.match(r'(\d+)', name)
-        label = match.group(1) if match else name
+        match = re.match(r'(\d+|flag)', name.lower())
+        label = match.group(1) if match else name.lower()
         img = cv.imread(os.path.join(TEMPLATE_DIR, fname), cv.IMREAD_GRAYSCALE)
         if img is not None:
             TEMPLATES[label].append(img)
@@ -144,11 +144,9 @@ def safe_mouse_click_retry(x, y, right=False, max_retries=3):
             jittered_x, jittered_y = jitter_pos(x, y)
             mouse_move(jittered_x, jittered_y)
             time.sleep(0.03)
-    print(f"Warning: Failed to move cursor for click at ({x},{y}) after {max_retries} retries.")
     return False
 
 def auto_flag_mines(tiles, mine_tiles, grid_width):
-    print(f"Auto-flagging {len(mine_tiles)} mines...")
     mouse_move(794, 296)
     time.sleep(0.1)
     for (r, c) in mine_tiles:
@@ -161,7 +159,6 @@ def auto_flag_mines(tiles, mine_tiles, grid_width):
     mouse_move(794, 296)
 
 def auto_click_safe(tiles, safe_tiles, grid_width):
-    print(f"Auto-clicking {len(safe_tiles)} safe tiles...")
     mouse_move(794, 296)
     time.sleep(0.1)
     for (r, c) in safe_tiles:
@@ -268,11 +265,11 @@ def build_grid(tiles, labels):
     for (x, y, w, h), label in zip(tiles, labels):
         row = y_map[y]
         col = x_map[x]
-        if label == "unknown" or label == "U":
+        if label == "unknown" or label == "u":
             label = "0"
         elif label == "?":
             label = "?"
-        elif label == "F":
+        elif label == "flag" or label == "f":
             label = "F"
         else:
             label = label  # number as string
@@ -422,6 +419,15 @@ def main():
 
         if DETECTION_ENABLED:
             v_lines, h_lines, mask = find_grid_lines_positions(cropped_bgr)
+            if len(v_lines) < 2 or len(h_lines) < 2:
+                safe_tiles, mine_tiles = set(), set()
+                tiles = []
+                grid = []
+                debug_img = cropped_bgr.copy()
+                cv.imshow("Detected Tiles + Solver Hints", debug_img)
+                time.sleep(CHECK_DELAY)
+                continue
+
             tiles = generate_tile_coordinates(v_lines, h_lines)
 
             labels = []
@@ -444,7 +450,6 @@ def main():
 
             grid = build_grid(tiles, labels)
             if not grid or not grid[0]:
-                print("Warning: Empty or invalid grid detected, skipping solver step.")
                 safe_tiles, mine_tiles = set(), set()
             else:
                 safe_tiles, mine_tiles = solver_step(grid)
@@ -456,42 +461,46 @@ def main():
                 cv.putText(debug_img, label, (x + 2, y + h // 2), cv.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
             for (r, c) in safe_tiles:
-                x, y, w, h = tiles[r * len(grid[0]) + c]
-                cv.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                if r * len(grid[0]) + c < len(tiles):
+                    x, y, w, h = tiles[r * len(grid[0]) + c]
+                    cv.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
             for (r, c) in mine_tiles:
-                x, y, w, h = tiles[r * len(grid[0]) + c]
-                cv.rectangle(debug_img, (x, y), (x + w, y + h), (0, 0, 255), 2)
-                cv.putText(debug_img, "M", (x + w//2 - 6, y + h // 2), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                if r * len(grid[0]) + c < len(tiles):
+                    x, y, w, h = tiles[r * len(grid[0]) + c]
+                    cv.rectangle(debug_img, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                    cv.putText(debug_img, "M", (x + 2, y + h - 4), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-            if remaining_mines is not None and not safe_tiles and not mine_tiles:
+            if remaining_mines is not None and len(safe_tiles) == 0 and len(mine_tiles) == 0:
                 prob_grid = compute_probabilities(grid, remaining_mines)
-                unknown_positions = [(r,c) for r in range(len(grid)) for c in range(len(grid[0])) if grid[r][c] == "?"]
-                if unknown_positions:
-                    sorted_unknowns = sorted(unknown_positions, key=lambda pos: prob_grid[pos[0]][pos[1]])
-                    top_guesses = sorted_unknowns[:3]
+                sorted_probs = []
+                for r in range(len(grid)):
+                    for c in range(len(grid[0])):
+                        if grid[r][c] == "?":
+                            sorted_probs.append(((r, c), prob_grid[r][c]))
+                sorted_probs.sort(key=lambda x: x[1])
+                top3 = sorted_probs[:3]
 
-                    for (r, c) in top_guesses:
+                for (r, c), p in top3:
+                    if r * len(grid[0]) + c < len(tiles):
                         x, y, w, h = tiles[r * len(grid[0]) + c]
-                        prob_percent = int(prob_grid[r][c] * 100)
                         cv.rectangle(debug_img, (x, y), (x + w, y + h), (255, 0, 0), 2)
-                        cv.putText(debug_img, f"{prob_percent}%", (x + 2, y + h - 4), cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-
-                    print("💡 Top 3 lowest risk guesses (row, col):")
-                    for (r, c) in top_guesses:
-                        print(f"  ({r},{c}) with {prob_grid[r][c]*100:.1f}% chance of mine")
+                        cv.putText(debug_img, f"{int(p*100)}%", (x + 2, y + h - 4), cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
             cv.imshow("Detected Tiles + Solver Hints", debug_img)
 
-        elapsed = time.time() - start_time
-        to_sleep = CHECK_DELAY - elapsed
-        if to_sleep > 0:
-            time.sleep(to_sleep)
+        else:
+            time.sleep(CHECK_DELAY)
 
         if cv.waitKey(1) & 0xFF == 27:
             break
 
+        elapsed = time.time() - start_time
+        if elapsed < CHECK_DELAY:
+            time.sleep(CHECK_DELAY - elapsed)
+
     cv.destroyAllWindows()
 
 if __name__ == "__main__":
+    print("Hotkeys: Alt+P=Pause, Alt+R=Resume, Alt+Q=Quit, Alt+F=Auto-Flag, Alt+K=Auto-Click Safe, Ctrl+P=Set Remaining Mines")
     main()
